@@ -1,0 +1,103 @@
+name: iOS app
+
+# Builds the iPhone app on a GitHub-hosted Mac and uploads Vox.ipa as an artifact.
+# The .ipa is UNSIGNED - iLoader (or Sideloadly / AltStore) signs it on your PC
+# with your own Apple ID when it installs it. Nothing here needs a Mac of your own
+# and nothing needs a paid developer account.
+#
+# Build minutes: macOS runners count 10x. On a PRIVATE repo one build is roughly
+# 15-20 of your 2,000 free minutes a month. On a PUBLIC repo minutes are unlimited
+# and free - and this app holds no secrets (the server address and any API key are
+# typed into the app at runtime, not stored in the code), so public is the cheap
+# option here. See the README.
+#
+# Manual by default so a code push never spends minutes on its own:
+#   gh workflow run ios.yml       (or the Actions tab -> "iOS app" -> Run workflow)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: "Build number to stamp into the app (optional)"
+        required: false
+        default: ""
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # macos-26 = Xcode 26. SWIFT_VERSION stays 5.0 in project.yml so Xcode 26
+    # doesn't switch the project to Swift 6 language mode.
+    runs-on: macos-26
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        # The release zip takes seconds; `brew install` can spend minutes updating
+        # Homebrew before it even starts.
+        run: |
+          if curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip \
+             && unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xg"; then
+            echo "$RUNNER_TEMP/xg/xcodegen/bin" >> "$GITHUB_PATH"
+          else
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+          fi
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build (unsigned)
+        working-directory: ios
+        env:
+          BUILD_INPUT: ${{ github.event.inputs.build_number }}
+        run: |
+          set -o pipefail
+          BUILD="${BUILD_INPUT:-${{ github.run_number }}}"
+          echo "Build number: $BUILD"
+          xcodebuild \
+            -project Vox.xcodeproj -scheme Vox -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CURRENT_PROJECT_VERSION="$BUILD" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            build 2>&1 | tee build.log | grep -E "error:|warning: .*(deprecat|unused)|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Build/Products/Release-iphoneos/Vox.app
+
+      - name: Ad-hoc sign and package IPA
+        working-directory: ios
+        run: |
+          app="build/Build/Products/Release-iphoneos/Vox.app"
+          # An ad-hoc signature keeps the bundle well-formed so the sideloading tool
+          # can re-sign it cleanly. No entitlements file: the app needs no push,
+          # no app groups and no capabilities beyond the microphone (a plist key).
+          codesign --force --sign - --timestamp=none --generate-entitlement-der "$app"
+          for key in CFBundleIdentifier CFBundleVersion CFBundleShortVersionString CFBundleDisplayName; do
+            echo "$key = $(plutil -extract "$key" raw -o - "$app/Info.plist")"
+          done
+          mkdir -p Payload
+          cp -R "$app" Payload/
+          zip -qry Vox.ipa Payload
+          ls -lh Vox.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Vox-ipa
+          path: ios/Vox.ipa
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: ios/build.log
+          retention-days: 7

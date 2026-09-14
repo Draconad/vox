@@ -1,0 +1,14 @@
+# XcodeGen output - the project is generated from ios/project.yml, never committed
+ios/*.xcodeproj
+ios/App/Info.plist
+ios/build/
+ios/Payload/
+ios/*.ipa
+ios/build.log
+
+# Downloaded builds
+build-out/
+
+.DS_Store
+__pycache__/
+*.pyc
